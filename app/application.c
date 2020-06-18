@@ -1,15 +1,19 @@
 #include <application.h>
+#include <bc_ds18b20.h>
 
 #define SERVICE_INTERVAL_INTERVAL (60 * 60 * 1000)
 #define BATTERY_UPDATE_INTERVAL (60 * 60 * 1000)
 #define TEMPERATURE_PUB_NO_CHANGE_INTEVAL (15 * 60 * 1000)
 #define TEMPERATURE_PUB_VALUE_CHANGE 0.2f
 #define TEMPERATURE_UPDATE_SERVICE_INTERVAL (5 * 1000)
-#define TEMPERATURE_UPDATE_NORMAL_INTERVAL (10 * 1000)
+#define TEMPERATURE_UPDATE_NORMAL_INTERVAL (1 * 60 * 1000)
 
 #define FLOOD_DETECTOR_NO_CHANGE_INTEVAL (15 * 60 * 1000)
 #define FLOOD_DETECTOR_UPDATE_SERVICE_INTERVAL (1 * 1000)
 #define FLOOD_DETECTOR_UPDATE_NORMAL_INTERVAL  (5 * 1000)
+
+#define TEMPERATURE_DS18B20_PUB_NO_CHANGE_INTEVAL (5  * 60* 1000)
+#define TEMPERATURE_DS18B20_PUB_VALUE_CHANGE 0.5f
 
 #define RADIO_FLOOD_DETECTOR        0x0d
 
@@ -26,6 +30,17 @@ static event_param_t temperature_event_param = { .next_pub = 0 };
 // Flood detector instance
 bc_flood_detector_t flood_detector;
 event_param_t flood_detector_event_param = { .next_pub = 0 };
+
+static bc_ds18b20_t ds18b20;
+
+struct {
+    event_param_t temperature;
+    event_param_t temperature_ds18b20;
+    event_param_t humidity;
+    event_param_t illuminance;
+    event_param_t pressure;
+
+} params;
 
 void button_event_handler(bc_button_t *self, bc_button_event_t event, void *event_param)
 {
@@ -93,11 +108,37 @@ void flood_detector_event_handler(bc_flood_detector_t *self, bc_flood_detector_e
     }
 }
 
+void ds18b20_event_handler(bc_ds18b20_t *self, uint64_t device_address, bc_ds18b20_event_t e, void *p)
+{
+    (void) p;
+
+    float value = NAN;
+
+    if (e == bc_ds18b20_EVENT_UPDATE)
+    {
+        bc_ds18b20_get_temperature_celsius(self, device_address, &value);
+
+        //bc_log_debug("UPDATE %" PRIx64 "(%d) = %f", device_address, device_index, value);
+
+        if ((fabs(value - params.temperature_ds18b20.value) >= TEMPERATURE_DS18B20_PUB_VALUE_CHANGE) || (params.temperature_ds18b20.next_pub < bc_scheduler_get_spin_tick()))
+        {
+            static char topic[64];
+            snprintf(topic, sizeof(topic), "ext-thermometer/%" PRIx64 "/temperature", device_address);
+            bc_radio_pub_float(topic, &value);
+            params.temperature_ds18b20.value = value;
+            params.temperature_ds18b20.next_pub = bc_scheduler_get_spin_tick() + TEMPERATURE_DS18B20_PUB_NO_CHANGE_INTEVAL;
+            bc_scheduler_plan_from_now(0, 300);
+        }
+    }
+}
+
 void switch_to_normal_mode_task(void *param)
 {
     bc_tmp112_set_update_interval(&tmp112, TEMPERATURE_UPDATE_NORMAL_INTERVAL);
 
     bc_flood_detector_set_update_interval(&flood_detector, FLOOD_DETECTOR_UPDATE_NORMAL_INTERVAL);
+
+    bc_ds18b20_set_update_interval(&ds18b20, TEMPERATURE_UPDATE_NORMAL_INTERVAL);
 
     bc_scheduler_unregister(bc_scheduler_get_current_task_id());
 }
@@ -131,7 +172,12 @@ void application_init(void)
     bc_flood_detector_set_event_handler(&flood_detector, flood_detector_event_handler, &flood_detector_event_param);
     bc_flood_detector_set_update_interval(&flood_detector, FLOOD_DETECTOR_UPDATE_SERVICE_INTERVAL);
 
-    bc_radio_pairing_request("flood-detector", VERSION);
+    // For single sensor you can call bc_ds18b20_init()
+    bc_ds18b20_init(&ds18b20, BC_DS18B20_RESOLUTION_BITS_12);
+    bc_ds18b20_set_event_handler(&ds18b20, ds18b20_event_handler, NULL);
+    bc_ds18b20_set_update_interval(&ds18b20, TEMPERATURE_UPDATE_SERVICE_INTERVAL);
+
+    bc_radio_pairing_request("zdeny-flood-detector-with-ext-temp", VERSION);
 
     bc_scheduler_register(switch_to_normal_mode_task, NULL, SERVICE_INTERVAL_INTERVAL);
 
